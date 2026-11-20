@@ -1,0 +1,90 @@
+name: Build APK
+
+# Put this file in your GitHub repo at:  .github/workflows/build-apk.yml
+# Then upload the project ZIP (SeBachao...zip) to the repo root and the APK is built automatically.
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate project (unzips a ZIP uploaded to the repo root if needed)
+        run: |
+          if [ -f settings.gradle.kts ]; then
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          else
+            z=$(ls -t *.zip | head -1)
+            mkdir -p _src && unzip -q "$z" -d _src
+            d=$(dirname "$(find _src -name settings.gradle.kts | head -1)")
+            echo "PROJECT_DIR=$d" >> "$GITHUB_ENV"
+          fi
+
+      - name: Download fonts (Bangers, Lilita One, Fredoka) - bundled inside the APK
+        run: |
+          d="$PROJECT_DIR/app/src/main/assets/fonts"
+          mkdir -p "$d"
+          hosts="https://raw.githubusercontent.com/google/fonts/main/ofl https://cdn.jsdelivr.net/gh/google/fonts@main/ofl https://github.com/google/fonts/raw/main/ofl"
+          get() {
+            out="$d/$1"; shift
+            if [ -f "$out" ] && [ "$(wc -c < "$out")" -gt 10000 ]; then echo "have $out"; return 0; fi
+            for h in $hosts; do
+              for p in "$@"; do
+                if curl -fsSL --retry 3 -o "$out" "$h/$p" && [ "$(wc -c < "$out")" -gt 10000 ]; then echo "ok $out"; return 0; fi
+                rm -f "$out"
+              done
+            done
+            echo "::error::could not download $out"
+            return 1
+          }
+          get bangers.ttf   "bangers/Bangers-Regular.ttf"
+          get lilitaone.ttf "lilitaone/LilitaOne-Regular.ttf"
+          get fredoka.ttf   "fredoka/Fredoka%5Bwdth%2Cwght%5D.ttf" "fredoka/Fredoka-VariableFont_wdth%2Cwght.ttf"
+          ls -la "$d"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses > /dev/null || true
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build debug + release APKs
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle assembleDebug assembleRelease --stacktrace
+
+      - name: Check that the fonts are inside the APK
+        run: |
+          apk="$PROJECT_DIR/app/build/outputs/apk/release/app-release.apk"
+          unzip -l "$apk" | grep -E "assets/fonts/(bangers|lilitaone|fredoka)\.ttf" || { echo "::error::fonts are missing from the APK"; exit 1; }
+
+      - name: Rename APKs
+        run: |
+          mkdir -p out
+          cp "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" out/100-Se-Bachao-debug.apk
+          cp "$PROJECT_DIR/app/build/outputs/apk/release/app-release.apk" out/100-Se-Bachao-release.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 100-Se-Bachao-APKs
+          path: out/*.apk
+
+      - name: Publish as GitHub Release (easy phone download)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: 100 Se Bachao! build ${{ github.run_number }}
+          files: out/*.apk
